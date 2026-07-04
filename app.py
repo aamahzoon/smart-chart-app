@@ -106,7 +106,7 @@ div[data-testid="stExpander"], div[data-testid="stVerticalBlockBorderWrapper"] {
 """, unsafe_allow_html=True)
 
 st.title("📊 Smart Chart Explorer — نسخه حرفه‌ای")
-st.caption("تشخیص خودکار نمودار، تحلیل آماری تخصصی، و ساخت گزارش/داشبورد اختصاصی از نمودارهای منتخب. (طراحی و ساخت: علی اکبر محزون)")
+st.caption("تشخیص خودکار نمودار، تحلیل آماری تخصصی، و ساخت گزارش/داشبورد اختصاصی از نمودارهای منتخب. (📉 طراحی و ساخت: علی اکبر محزون)")
 
 
 def fa_num(x, decimals=None) -> str:
