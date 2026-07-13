@@ -15,11 +15,8 @@ Smart Chart Explorer — Pro
     streamlit run app.py
 """
 
-import json
-import re
 import uuid
 from datetime import datetime
-from html import escape as html_escape
 
 import numpy as np
 import pandas as pd
@@ -62,353 +59,6 @@ PLOTLY_TEMPLATE = go.layout.Template(
 )
 px.defaults.template = PLOTLY_TEMPLATE
 px.defaults.color_discrete_sequence = PLOTLY_COLORWAY
-
-# ============================================================================
-# موتور جاوااسکریپت رسم/فیلتر تعاملی نمودارها در گزارش HTML مستقل خروجی
-# (به‌ازای هر نمودار که با چک‌باکس فیلتر شود، این کد سمت کلاینت آن را از نو رسم می‌کند)
-# ============================================================================
-REPORT_JS_ENGINE = """
-<script>
-(function(){
-  const PALETTE = ["#2563eb","#f59e0b","#10b981","#ef4444","#8b5cf6","#06b6d4","#ec4899","#84cc16","#f97316","#6366f1"];
-
-  function baseLayout(extra){
-    return Object.assign({
-      paper_bgcolor:'#ffffff', plot_bgcolor:'#ffffff',
-      font:{family:'Vazirmatn, Tahoma, sans-serif', color:'#1e293b', size:13},
-      margin:{t:30,l:40,r:20,b:40},
-      legend:{orientation:'h', y:-0.25},
-      colorway: PALETTE
-    }, extra||{});
-  }
-
-  function fmtFa(v, d){
-    if(v===null||v===undefined||isNaN(v)) return '—';
-    return Number(v).toLocaleString('fa-IR', {maximumFractionDigits: d===undefined?2:d});
-  }
-
-  function uniqueSorted(arr){
-    return Array.from(new Set(arr.filter(v=>v!==null && v!==undefined))).sort();
-  }
-
-  function aggValues(arr, agg){
-    if(agg==='count') return arr.length;
-    const nums = arr.filter(v=>v!==null&&v!==undefined&&v!==''&&!isNaN(v)).map(Number);
-    if(!nums.length) return null;
-    switch(agg){
-      case 'sum': return nums.reduce((a,b)=>a+b,0);
-      case 'mean': return nums.reduce((a,b)=>a+b,0)/nums.length;
-      case 'median': { const s=[...nums].sort((a,b)=>a-b); const m=Math.floor(s.length/2); return s.length%2? s[m] : (s[m-1]+s[m])/2; }
-      case 'max': return Math.max(...nums);
-      case 'min': return Math.min(...nums);
-      default: return nums.reduce((a,b)=>a+b,0)/nums.length;
-    }
-  }
-
-  function renderXY(id, recs, spec){
-    const roles = spec.roles, mode = spec.mode, agg = spec.agg;
-    const colorKey = roles.color;
-    const groups = colorKey ? uniqueSorted(recs.map(r=>r[colorKey])) : [null];
-    const traces = [];
-    groups.forEach((g, gi) => {
-      const rows = colorKey ? recs.filter(r=>r[colorKey]===g) : recs;
-      let trace = {name: g===null ? (roles.y||'مقدار') : String(g), marker:{color: PALETTE[gi%PALETTE.length]}};
-      if(mode==='bar' || ((mode==='line') && agg)){
-        const xs = uniqueSorted(rows.map(r=>r[roles.x]));
-        const ys = xs.map(xv => aggValues(rows.filter(r=>r[roles.x]===xv).map(r=>r[roles.y]), agg||'sum'));
-        trace = Object.assign(trace, {x: xs, y: ys, type: mode==='bar'?'bar':'scatter',
-          mode: mode==='bar'?undefined:'lines+markers'});
-      } else if(mode==='scatter' || mode==='bubble'){
-        const sizeKey = roles.size;
-        const marker = Object.assign({}, trace.marker, {size: 8});
-        if(sizeKey){
-          const sizes = rows.map(r=>Number(r[sizeKey])||0);
-          const maxS = Math.max(...sizes, 1);
-          marker.size = sizes; marker.sizemode='area'; marker.sizeref = 2*maxS/(42*42); marker.sizemin=4;
-        }
-        trace = Object.assign(trace, {x: rows.map(r=>r[roles.x]), y: rows.map(r=>r[roles.y]), mode:'markers', type:'scatter', marker});
-      } else if(mode==='line'){
-        const sorted = [...rows].sort((a,b)=> (a[roles.x]>b[roles.x]?1:(a[roles.x]<b[roles.x]?-1:0)));
-        trace = Object.assign(trace, {x: sorted.map(r=>r[roles.x]), y: sorted.map(r=>r[roles.y]), type:'scatter', mode:'lines+markers'});
-      } else if(mode==='box' || mode==='violin'){
-        trace = Object.assign(trace, {x: rows.map(r=>r[roles.x]), y: rows.map(r=>r[roles.y]), type: mode,
-          boxpoints: mode==='box' ? false : undefined});
-      }
-      traces.push(trace);
-    });
-    Plotly.newPlot(id, traces, baseLayout({barmode: (mode==='bar' && groups.length>1) ? 'group' : undefined}),
-      {displaylogo:false, responsive:true});
-  }
-
-  function renderStackedXY(id, recs, spec){
-    const x = spec.roles.x, yCols = spec.roles.y_cols;
-    const xs = uniqueSorted(recs.map(r=>r[x]));
-    const traces = yCols.map((yc, i) => ({
-      name: yc, type:'bar', x: xs,
-      y: xs.map(xv => aggValues(recs.filter(r=>r[x]===xv).map(r=>r[yc]), 'sum')),
-      marker:{color: PALETTE[i%PALETTE.length]}
-    }));
-    Plotly.newPlot(id, traces, baseLayout({barmode:'stack'}), {displaylogo:false, responsive:true});
-  }
-
-  function renderHist(id, recs, spec){
-    const x = spec.roles.x, colorKey = spec.roles.color, bins = spec.bins||30;
-    const groups = colorKey ? uniqueSorted(recs.map(r=>r[colorKey])) : [null];
-    const traces = groups.map((g,i)=>{
-      const rows = colorKey ? recs.filter(r=>r[colorKey]===g) : recs;
-      return {x: rows.map(r=>r[x]), type:'histogram', nbinsx: bins, name: g===null? x : String(g),
-        marker:{color: PALETTE[i%PALETTE.length]}, opacity: groups.length>1?0.75:1};
-    });
-    Plotly.newPlot(id, traces, baseLayout({barmode: groups.length>1?'overlay':undefined}), {displaylogo:false, responsive:true});
-  }
-
-  function renderPie(id, recs, spec){
-    const names = spec.roles.names, valuesCol = spec.roles.values;
-    const cats = uniqueSorted(recs.map(r=>r[names]));
-    const vals = cats.map(c => valuesCol
-      ? aggValues(recs.filter(r=>r[names]===c).map(r=>r[valuesCol]), 'sum')
-      : recs.filter(r=>r[names]===c).length);
-    Plotly.newPlot(id, [{labels:cats, values:vals, type:'pie'}], baseLayout({}), {displaylogo:false, responsive:true});
-  }
-
-  function pearson(a,b){
-    const n=a.length;
-    if(!n) return 0;
-    const ma=a.reduce((s,v)=>s+v,0)/n, mb=b.reduce((s,v)=>s+v,0)/n;
-    let num=0, da=0, db=0;
-    for(let i=0;i<n;i++){ num+=(a[i]-ma)*(b[i]-mb); da+=(a[i]-ma)**2; db+=(b[i]-mb)**2; }
-    return (da && db) ? num/Math.sqrt(da*db) : 0;
-  }
-
-  function renderHeatmapCorr(id, recs, spec){
-    const cols = spec.roles.numeric_cols;
-    const clean = recs.filter(r=> cols.every(c=> r[c]!==null && r[c]!==undefined && r[c]!=='' && !isNaN(r[c])));
-    const z = cols.map(c1 => cols.map(c2 => pearson(clean.map(r=>Number(r[c1])), clean.map(r=>Number(r[c2])))));
-    Plotly.newPlot(id, [{z, x:cols, y:cols, type:'heatmap', colorscale:'RdBu', zmin:-1, zmax:1,
-      text: z.map(row=>row.map(v=>v.toFixed(2))), texttemplate:"%{text}"}], baseLayout({}), {displaylogo:false, responsive:true});
-  }
-
-  function renderHeatmapPivot(id, recs, spec){
-    const row = spec.roles.row, col = spec.roles.col, value = spec.roles.value, agg = spec.agg||'mean';
-    const rows = uniqueSorted(recs.map(r=>r[row]));
-    const colsU = uniqueSorted(recs.map(r=>r[col]));
-    const z = rows.map(rv => colsU.map(cv => {
-      const subset = recs.filter(r=> r[row]===rv && r[col]===cv);
-      return value ? aggValues(subset.map(r=>r[value]), agg) : subset.length;
-    }));
-    Plotly.newPlot(id, [{z, x: colsU, y: rows, type:'heatmap', colorscale:'Blues',
-      text: z.map(rr=>rr.map(v=> v===null?'':Number(v).toFixed(2))), texttemplate:"%{text}"}],
-      baseLayout({}), {displaylogo:false, responsive:true});
-  }
-
-  function renderTreemap(id, recs, spec){
-    const path = spec.roles.path, valueCol = spec.roles.value;
-    const labels=['همه'], parents=[''], values=[0];
-    const nodeMap = {'': 0};
-    recs.forEach(r=>{
-      const amt = valueCol ? (Number(r[valueCol])||0) : 1;
-      values[0]+=amt;
-      let cum = 'همه';
-      for(let i=0;i<path.length;i++){
-        const val = r[path[i]];
-        if(val===null||val===undefined) break;
-        const key = cum+'/'+val;
-        if(!(key in nodeMap)){
-          nodeMap[key]=labels.length; labels.push(String(val)); parents.push(cum); values.push(0);
-        }
-        values[nodeMap[key]] += amt;
-        cum = key;
-      }
-    });
-    Plotly.newPlot(id, [{type:'treemap', labels, parents, values, branchvalues:'total'}], baseLayout({}),
-      {displaylogo:false, responsive:true});
-  }
-
-  function renderRadar(id, recs, spec){
-    const metrics = spec.roles.metrics, subject = spec.roles.subject, agg = spec.agg||'mean';
-    const traces=[];
-    if(subject){
-      let subs = (spec.extra && spec.extra.subjects && spec.extra.subjects.length) ? spec.extra.subjects : uniqueSorted(recs.map(r=>r[subject]));
-      subs.forEach(s=>{
-        const rows = recs.filter(r=> String(r[subject])===String(s));
-        const vals = metrics.map(m=> aggValues(rows.map(r=>r[m]), agg));
-        vals.push(vals[0]);
-        traces.push({type:'scatterpolar', r: vals, theta:[...metrics, metrics[0]], fill:'toself', name:String(s)});
-      });
-    } else {
-      const vals = metrics.map(m=> aggValues(recs.map(r=>r[m]), agg));
-      vals.push(vals[0]);
-      traces.push({type:'scatterpolar', r: vals, theta:[...metrics, metrics[0]], fill:'toself', name:'کل داده'});
-    }
-    Plotly.newPlot(id, traces, baseLayout({polar:{radialaxis:{visible:true}}}), {displaylogo:false, responsive:true});
-  }
-
-  function renderGauge(id, recs, spec, half){
-    const metric = spec.roles.metric, agg = spec.agg||'mean';
-    const val = aggValues(recs.map(r=>r[metric]), agg) || 0;
-    const minV = spec.extra.min, maxV = spec.extra.max, title = spec.extra.title || metric;
-    if(half){
-      const span = maxV-minV;
-      const filled = Math.max(Math.min(val,maxV)-minV, 0);
-      const remaining = span-filled;
-      Plotly.newPlot(id, [{type:'pie', values:[filled, remaining, span], hole:0.65, rotation:270,
-        direction:'clockwise', sort:false, marker:{colors:['#2563eb','#e2e8f0','rgba(0,0,0,0)']},
-        textinfo:'none', showlegend:false, hoverinfo:'skip'}],
-        {height:300, margin:{t:10,b:10,l:10,r:10},
-         annotations:[{text:'<b>'+fmtFa(val,1)+'</b><br><span style="font-size:12px;color:#64748b">'+title+'</span>',
-                        x:0.5,y:0.5, showarrow:false, font:{size:22,color:'#1e293b'}}]},
-        {displaylogo:false, responsive:true});
-    } else {
-      Plotly.newPlot(id, [{type:'indicator', mode:'gauge+number', value: val, title:{text:title, font:{size:18}},
-        gauge:{axis:{range:[minV,maxV]}, bar:{color:'#2563eb'},
-          steps:[{range:[minV, minV+(maxV-minV)*0.5], color:'#e2e8f0'},
-                 {range:[minV+(maxV-minV)*0.5, minV+(maxV-minV)*0.8], color:'#cbd5e1'}],
-          threshold:{line:{color:'#f59e0b',width:4}, thickness:0.85, value: val}}}],
-        {height:380}, {displaylogo:false, responsive:true});
-    }
-  }
-
-  function renderInfoCards(id, recs, spec){
-    const metrics = spec.roles.metrics, aggLabel = (spec.extra && spec.extra.agg_label) || 'میانگین';
-    const aggMap = {"مجموع":"sum","میانگین":"mean","حداکثر":"max","حداقل":"min","تعداد":"count"};
-    const el = document.getElementById(id);
-    if(!el) return;
-    let html = '<div style="display:flex;gap:14px;flex-wrap:wrap;direction:rtl;">';
-    metrics.forEach(m=>{
-      const val = aggValues(recs.map(r=>r[m]), aggMap[aggLabel]||'mean');
-      html += '<div style="flex:1;min-width:170px;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:16px 18px;box-shadow:0 1px 3px rgba(15,23,42,.06);">'
-        + '<div style="font-size:13px;color:#64748b;margin-bottom:6px;">'+aggLabel+' '+m+'</div>'
-        + '<div style="font-size:26px;font-weight:800;color:#2563eb;">'+fmtFa(val,2)+'</div></div>';
-    });
-    html += '</div>';
-    el.innerHTML = html;
-  }
-
-  function renderChord(id, recs, spec){
-    const source = spec.roles.source, target = spec.roles.target, valueCol = spec.roles.value;
-    const topN = (spec.extra && spec.extra.top_n) || 10;
-    const flowMap = {};
-    recs.forEach(r=>{
-      const s=r[source], t=r[target];
-      if(s===null||t===null||s===undefined||t===undefined) return;
-      const key = s+'|||'+t;
-      const amt = valueCol ? (Number(r[valueCol])||0) : 1;
-      flowMap[key] = (flowMap[key]||0) + amt;
-    });
-    const countMap = {};
-    Object.keys(flowMap).forEach(k=>{
-      const [s,t] = k.split('|||');
-      countMap[s] = (countMap[s]||0)+flowMap[k];
-      countMap[t] = (countMap[t]||0)+flowMap[k];
-    });
-    let labels = Object.keys(countMap).sort((a,b)=>countMap[b]-countMap[a]).slice(0, topN);
-    const labelSet = new Set(labels);
-    labels = labels.sort();
-    const idx = {}; labels.forEach((l,i)=>idx[l]=i);
-    const n = labels.length;
-    const el = document.getElementById(id);
-    if(n<2){ if(el) el.innerHTML='<p style="color:#64748b;">داده کافی برای نمودار وتری وجود ندارد.</p>'; return; }
-    const matrix = Array.from({length:n}, ()=>new Array(n).fill(0));
-    Object.keys(flowMap).forEach(k=>{
-      const [s,t] = k.split('|||');
-      if(labelSet.has(s) && labelSet.has(t)) matrix[idx[s]][idx[t]] += flowMap[k];
-    });
-    const totalPerNode = matrix.map((row,i)=> row.reduce((a,b)=>a+b,0) + matrix.reduce((a,r)=>a+r[i],0) - matrix[i][i]);
-    const grandTotal = totalPerNode.reduce((a,b)=>a+b,0);
-    if(grandTotal<=0){ if(el) el.innerHTML='<p style="color:#64748b;">داده کافی برای نمودار وتری وجود ندارد.</p>'; return; }
-    const gap = 0.015*2*Math.PI;
-    let start=0; const nodeAngles=[];
-    for(let i=0;i<n;i++){
-      let span = (totalPerNode[i]/grandTotal)*(2*Math.PI - n*gap);
-      span = Math.max(span, 1e-6);
-      nodeAngles.push([start, start+span]);
-      start += span+gap;
-    }
-    const point = (ang, r) => { r = r===undefined?1:r; return [r*Math.cos(ang), r*Math.sin(ang)]; };
-    const bezier=(p0,p1,p2,t)=> [ (1-t)**2*p0[0]+2*(1-t)*t*p1[0]+t**2*p2[0], (1-t)**2*p0[1]+2*(1-t)*t*p1[1]+t**2*p2[1] ];
-    const traces = [];
-    const annotations = [];
-    for(let i=0;i<n;i++){
-      const [a0,a1]=nodeAngles[i];
-      const theta = Array.from({length:30}, (_,k)=> a0 + (a1-a0)*k/29);
-      traces.push({x: theta.map(t=>1.03*Math.cos(t)), y: theta.map(t=>1.03*Math.sin(t)), mode:'lines',
-        line:{color:PALETTE[i%PALETTE.length], width:12}, hoverinfo:'text',
-        text: labels[i]+' (مجموع: '+totalPerNode[i].toFixed(1)+')', showlegend:false});
-      const mid=(a0+a1)/2; const lm=point(mid,1.14);
-      annotations.push({x:lm[0], y:lm[1], text:labels[i], showarrow:false, font:{size:12,color:'#1e293b'}, xanchor:'center'});
-    }
-    const cursor = nodeAngles.map(a=>a[0]);
-    for(let i=0;i<n;i++){
-      for(let j=0;j<n;j++){
-        const val = matrix[i][j];
-        if(val<=0) continue;
-        const spanI = totalPerNode[i]>0 ? (val/totalPerNode[i])*(nodeAngles[i][1]-nodeAngles[i][0]) : 0;
-        const spanJ = totalPerNode[j]>0 ? (val/totalPerNode[j])*(nodeAngles[j][1]-nodeAngles[j][0]) : 0;
-        const aStart=cursor[i], aEnd=cursor[i]+spanI;
-        const bStart=cursor[j], bEnd=cursor[j]+spanJ;
-        cursor[i]+=spanI;
-        if(i!==j) cursor[j]+=spanJ;
-        const tArr = Array.from({length:20}, (_,k)=>k/19);
-        const pA0=point(aStart), pA1=point(aEnd), pB0=point(bStart), pB1=point(bEnd), center=[0,0];
-        const curve1 = tArr.map(t=>bezier(pA1, center, pB0, t));
-        const curve2 = tArr.map(t=>bezier(pB1, center, pA0, t));
-        const arcA = Array.from({length:10}, (_,k)=> point(aStart + (aEnd-aStart)*k/9));
-        const arcB = Array.from({length:10}, (_,k)=> point(bStart + (bEnd-bStart)*k/9));
-        const poly = [...arcA, ...curve1, ...arcB, ...curve2];
-        traces.push({x: poly.map(p=>p[0]), y: poly.map(p=>p[1]), mode:'lines', fill:'toself',
-          line:{width:0.5, color:PALETTE[i%PALETTE.length]}, fillcolor:PALETTE[i%PALETTE.length], opacity:0.42,
-          hoverinfo:'text', text: labels[i]+' → '+labels[j]+': '+val.toFixed(1), showlegend:false});
-      }
-    }
-    Plotly.newPlot(id, traces, {
-      xaxis:{visible:false, range:[-1.45,1.45]}, yaxis:{visible:false, range:[-1.45,1.45], scaleanchor:'x', scaleratio:1},
-      height:560, annotations, margin:{t:20,b:20,l:20,r:20}
-    }, {displaylogo:false, responsive:true});
-  }
-
-  const RENDERERS = {
-    xy: renderXY, stacked_xy: renderStackedXY, hist: renderHist, pie: renderPie,
-    heatmap_corr: renderHeatmapCorr, heatmap_pivot: renderHeatmapPivot, treemap: renderTreemap,
-    radar: renderRadar, gauge: (id,r,s)=>renderGauge(id,r,s,false), half_gauge: (id,r,s)=>renderGauge(id,r,s,true),
-    info_cards: renderInfoCards, chord: renderChord,
-  };
-
-  function getCheckedValues(itemId, col){
-    const nodes = document.querySelectorAll('.filter-checkbox[data-item="'+itemId+'"][data-col="'+CSS.escape(col)+'"]');
-    const vals=[];
-    nodes.forEach(n=>{ if(n.checked) vals.push(n.value); });
-    return vals;
-  }
-
-  window.setAllFilterChecks = function(itemId, col, checked){
-    const nodes = document.querySelectorAll('.filter-checkbox[data-item="'+itemId+'"][data-col="'+CSS.escape(col)+'"]');
-    nodes.forEach(function(n){ n.checked = checked; });
-    window.renderReportItem(itemId);
-  };
-
-  window.renderReportItem = function(itemId){
-    const cfg = window.__reportData && window.__reportData[itemId];
-    if(!cfg) return;
-    let recs = cfg.records;
-    (cfg.filter_cols||[]).forEach(col=>{
-      const checked = getCheckedValues(itemId, col);
-      recs = recs.filter(r => checked.includes(r[col]===null||r[col]===undefined ? '' : String(r[col])));
-    });
-    const renderer = RENDERERS[cfg.spec.type];
-    if(renderer) renderer('plot_'+itemId, recs, cfg.spec);
-  };
-
-  window.__initReportCharts = function(){
-    Object.keys(window.__reportData||{}).forEach(function(k){ window.renderReportItem(k); });
-  };
-  if(document.readyState==='loading'){
-    document.addEventListener('DOMContentLoaded', window.__initReportCharts);
-  } else {
-    window.__initReportCharts();
-  }
-})();
-</script>
-"""
 
 st.markdown(f"""
 <style>
@@ -473,15 +123,6 @@ def fa_num(x, decimals=None) -> str:
         text = f"{x:,}" if decimals is None else f"{x:,.{decimals}f}"
     mapping = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
     return text.translate(mapping)
-
-
-def md_bold_to_html(text: str) -> str:
-    """علامت‌های ستاره‌دار مارک‌داون (**پررنگ**) را به تگ HTML <b> تبدیل می‌کند
-    تا هم در اپ و هم در گزارش/داشبورد و نمایش اسلایدی خروجی HTML، به‌صورت پررنگ صحیح دیده شوند
-    (به‌جای این‌که علامت ** به‌صورت خام روی صفحه ظاهر شود)."""
-    if not text:
-        return text
-    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
 
 
 # ============================================================================
@@ -747,63 +388,13 @@ if "report_items" not in st.session_state:
     st.session_state.report_items = []
 
 
-def _to_json_native(v):
-    """تبدیل انواع داده numpy/pandas به انواع پایتون خالص برای سریال‌سازی امن JSON."""
-    if v is None:
-        return None
-    if isinstance(v, (np.integer,)):
-        return int(v)
-    if isinstance(v, (np.floating,)):
-        f = float(v)
-        return None if (f != f) else f  # NaN check
-    if isinstance(v, (np.bool_,)):
-        return bool(v)
-    if isinstance(v, float) and v != v:  # NaN
-        return None
-    if pd.isna(v) if not isinstance(v, (list, dict)) else False:
-        return None
-    return v
-
-
-def df_records(frame: pd.DataFrame, needed_cols: list) -> list:
-    """تبدیل زیرمجموعه‌ای از دیتافریم به لیست رکوردهای JSON-سازگار (برای فیلتر تعاملی در گزارش خروجی)."""
-    needed_cols = [c for c in dict.fromkeys(needed_cols) if c and c in frame.columns]
-    sub = frame[needed_cols].copy()
-    for c in sub.columns:
-        if pd.api.types.is_datetime64_any_dtype(sub[c]):
-            sub[c] = sub[c].dt.strftime("%Y-%m-%d")
-        elif pd.api.types.is_bool_dtype(sub[c]):
-            sub[c] = sub[c].astype(str)
-    sub = sub.astype(object).where(pd.notna(sub), None)
-    records = sub.to_dict(orient="records")
-    return [{k: _to_json_native(v) for k, v in rec.items()} for rec in records]
-
-
-def spec_role_columns(spec: dict) -> list:
-    """استخراج نام همهٔ ستون‌هایی که یک chart_spec برای بازسازی نمودار به آن‌ها نیاز دارد."""
-    if not spec:
-        return []
-    cols = []
-    roles = spec.get("roles", {})
-    for key in ("x", "y", "color", "size", "names", "values", "row", "col", "value", "subject", "source", "target", "metric"):
-        v = roles.get(key)
-        if v:
-            cols.append(v)
-    for key in ("metrics", "path", "numeric_cols", "y_cols"):
-        v = roles.get(key)
-        if v:
-            cols.extend(v)
-    return list(dict.fromkeys([c for c in cols if c]))
-
-
 def render_metrics(metric_pairs):
     cols = st.columns(len(metric_pairs))
     for c, (label, value) in zip(cols, metric_pairs):
         c.metric(label, value)
 
 
-def render_analysis_block(unique_key: str, title: str, fig, analysis_type: str, analysis: dict,
-                           is_html: bool = False, chart_spec: dict = None, spec_df: pd.DataFrame = None):
+def render_analysis_block(unique_key: str, title: str, fig, analysis_type: str, analysis: dict, is_html: bool = False):
     """نمایش نمودار (یا محتوای HTML مثل کارت‌های اطلاعاتی) + تحلیل آماری + دکمه افزودن به گزارش."""
     if is_html:
         st.markdown(fig, unsafe_allow_html=True)
@@ -853,32 +444,15 @@ def render_analysis_block(unique_key: str, title: str, fig, analysis_type: str, 
                 for c1, c2, r in analysis["top_pairs"]:
                     st.metric(f"{c1} ↔ {c2}", fa_num(r, 3))
 
-            st.markdown(f'<div class="insight-box">💡 <b>بینش‌های تحلیلی:</b><br>{md_bold_to_html(analysis["insight"])}</div>',
+            st.markdown(f'<div class="insight-box">💡 <b>بینش‌های تحلیلی:</b><br>{analysis["insight"]}</div>',
                         unsafe_allow_html=True)
-
-    chosen_filters = []
-    if chart_spec is not None and spec_df is not None and not spec_df.empty:
-        candidate_cols = [
-            c for c in spec_df.columns
-            if spec_df[c].dtype == object
-            or pd.api.types.is_bool_dtype(spec_df[c])
-            or (pd.api.types.is_numeric_dtype(spec_df[c]) and spec_df[c].nunique(dropna=True) <= 15)
-            or pd.api.types.is_datetime64_any_dtype(spec_df[c])
-        ]
-        if candidate_cols:
-            chosen_filters = st.multiselect(
-                "🧩 فیلترهای چک‌باکسی این نمودار در گزارش خروجی (اختیاری — می‌توانی چند مورد انتخاب کنی)",
-                candidate_cols, key=f"filtercols_{unique_key}",
-            )
 
     if st.button("➕ افزودن این نمودار و تحلیل به گزارش من", key=f"add_{unique_key}"):
         stats_html = ""
         if "error" not in analysis:
-            insight_html = md_bold_to_html(analysis["insight"]).replace("\n", "<br>")
+            insight_html = analysis["insight"].replace("\n", "<br>")
         else:
-            # وقتی تحلیل آماری تخصصی/بینشی برای این ترکیب نمودار در دسترس نیست، به‌جای نمایش
-            # زیرنویس «در دسترس نیست» در گزارش و نمایش اسلایدی خروجی، بخش بینش کلاً حذف می‌شود.
-            insight_html = ""
+            insight_html = analysis["error"]
         if is_html:
             fig_html_content = f'<div style="width:100%;">{fig}</div>'
         else:
@@ -887,30 +461,14 @@ def render_analysis_block(unique_key: str, title: str, fig, analysis_type: str, 
                 + pio.to_html(fig, full_html=False, include_plotlyjs=False, config={"displaylogo": False})
                 + '</div>'
             )
-        report_item = {
+        st.session_state.report_items.append({
             "id": str(uuid.uuid4()),
             "title": title,
             "fig_html": fig_html_content,
             "insight_html": insight_html,
             "width": "full",
             "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "chart_spec": None,
-        }
-        if chart_spec is not None and spec_df is not None and chosen_filters:
-            role_cols = spec_role_columns(chart_spec)
-            needed_cols = list(dict.fromkeys(role_cols + chosen_filters))
-            filter_values = {}
-            for c in chosen_filters:
-                if pd.api.types.is_datetime64_any_dtype(spec_df[c]):
-                    vals = sorted(spec_df[c].dropna().dt.strftime("%Y-%m-%d").unique().tolist())
-                else:
-                    vals = sorted(spec_df[c].dropna().astype(str).unique().tolist())
-                filter_values[c] = vals
-            report_item["chart_spec"] = chart_spec
-            report_item["records"] = df_records(spec_df, needed_cols)
-            report_item["filter_cols"] = chosen_filters
-            report_item["filter_values"] = filter_values
-        st.session_state.report_items.append(report_item)
+        })
         st.success(f"✅ نمودار «{title}» به گزارش اضافه شد. برای مشاهده به تب «گزارش و داشبورد من» برو.")
 
 
@@ -975,27 +533,6 @@ def suggest_charts(df: pd.DataFrame, cols: dict) -> list:
                              "type": "correlation", "params": {"numeric_cols": numeric}})
 
     return suggestions
-
-
-def auto_item_to_spec(item: dict):
-    """تبدیل نمودارهای پیشنهادی خودکار به chart_spec قابل‌فهم برای موتور فیلتر تعاملی گزارش."""
-    t, p = item["type"], item["params"]
-    if t == "timeseries":
-        return {"type": "xy", "mode": "line", "roles": {"x": p["date_col"], "y": p["num_col"]}}
-    if t == "distribution":
-        return {"type": "hist", "roles": {"x": p["col"]}, "bins": 30}
-    if t == "regression":
-        return {"type": "xy", "mode": "scatter", "roles": {"x": p["x_col"], "y": p["y_col"]}}
-    if t == "anova":
-        return {"type": "xy", "mode": "box", "roles": {"x": p["cat_col"], "y": p["num_col"]}}
-    if t == "categorical":
-        is_pie = bool(item["fig"].data) and getattr(item["fig"].data[0], "type", "") == "pie"
-        if is_pie:
-            return {"type": "pie", "roles": {"names": p["col"], "values": None}}
-        return {"type": "xy", "mode": "bar", "agg": "count", "roles": {"x": p["col"], "y": None}}
-    if t == "correlation":
-        return {"type": "heatmap_corr", "roles": {"numeric_cols": p["numeric_cols"]}}
-    return None
 
 
 def run_analysis(item: dict, df: pd.DataFrame) -> dict:
@@ -1231,7 +768,7 @@ def make_half_gauge(value, min_v, max_v, title):
     remaining = span - filled
     fig = go.Figure(go.Pie(
         values=[filled, remaining, span],
-        hole=0.65, rotation=270, direction="clockwise", sort=False,
+        hole=0.65, rotation=90, direction="clockwise", sort=False,
         marker=dict(colors=[ACCENT_COLOR, GRID_COLOR, "rgba(0,0,0,0)"]),
         textinfo="none", showlegend=False, hoverinfo="skip",
     ))
@@ -1267,13 +804,6 @@ if df.empty:
 
 cols = classify_columns(df)
 
-with st.expander("🔍 پیش‌نمایش داده", expanded=False):
-    st.dataframe(df.head(50), use_container_width=True)
-    st.markdown(f"**ستون‌های عددی:** {', '.join(cols['numeric']) or '—'}")
-    st.markdown(f"**ستون‌های دسته‌ای:** {', '.join(cols['categorical']) or '—'}")
-    st.markdown(f"**ستون‌های تاریخی:** {', '.join(cols['datetime']) or '—'}")
-    st.markdown(f"**ستون‌های بولی:** {', '.join(cols['boolean']) or '—'}")
-
 df = render_filter_panel(df, cols)
 if df.empty:
     st.warning("با فیلترهای انتخاب‌شده هیچ داده‌ای باقی نماند. لطفاً فیلترها را تغییر بده.")
@@ -1284,6 +814,13 @@ m1.metric("تعداد ردیف‌ها", fa_num(len(df)))
 m2.metric("تعداد ستون‌ها", fa_num(df.shape[1]))
 m3.metric("ستون‌های عددی", fa_num(len(cols["numeric"])))
 m4.metric("ستون‌های دسته‌ای", fa_num(len(cols["categorical"])))
+
+with st.expander("🔍 پیش‌نمایش داده", expanded=False):
+    st.dataframe(df.head(50), use_container_width=True)
+    st.markdown(f"**ستون‌های عددی:** {', '.join(cols['numeric']) or '—'}")
+    st.markdown(f"**ستون‌های دسته‌ای:** {', '.join(cols['categorical']) or '—'}")
+    st.markdown(f"**ستون‌های تاریخی:** {', '.join(cols['datetime']) or '—'}")
+    st.markdown(f"**ستون‌های بولی:** {', '.join(cols['boolean']) or '—'}")
 
 tab_auto, tab_manual, tab_report = st.tabs(
     ["🤖 نمودار پیشنهادی خودکار", "🛠️ نمودار دلخواه من", f"📑 گزارش و داشبورد من ({len(st.session_state.report_items)})"]
@@ -1298,9 +835,7 @@ with tab_auto:
     for i, item in enumerate(suggestions):
         st.markdown(f"### {item['title']}")
         analysis = run_analysis(item, df)
-        auto_spec = auto_item_to_spec(item)
-        render_analysis_block(f"auto_{i}", item["title"], item["fig"], item["type"], analysis,
-                               chart_spec=auto_spec, spec_df=df)
+        render_analysis_block(f"auto_{i}", item["title"], item["fig"], item["type"], analysis)
         st.divider()
 
 # --------------------------- تب ۲: نمودار دلخواه -----------------------------
@@ -1453,14 +988,11 @@ with tab_manual:
             fig = None
             analysis_type = None
             analysis_params = {}
-            spec = None
-            agg_code = None
 
             if chart_type in ["خطی (Line)", "میله‌ای (Bar)"] and agg_func and agg_func != "بدون تجمیع (مقادیر خام)":
                 agg_map = {"میانگین": "mean", "مجموع": "sum", "تعداد": "count", "میانه": "median"}
-                agg_code = agg_map[agg_func]
                 group_cols = [x_col] + ([color_col] if color_col else [])
-                plot_df = df.groupby(group_cols, dropna=False)[y_col].agg(agg_code).reset_index()
+                plot_df = df.groupby(group_cols, dropna=False)[y_col].agg(agg_map[agg_func]).reset_index()
             else:
                 plot_df = df
 
@@ -1470,45 +1002,35 @@ with tab_manual:
                     analysis_type, analysis_params = "timeseries", {"date_col": x_col, "num_col": y_col}
                 elif pd.api.types.is_numeric_dtype(df[x_col]) and pd.api.types.is_numeric_dtype(df[y_col]):
                     analysis_type, analysis_params = "regression", {"x_col": x_col, "y_col": y_col}
-                spec = {"type": "xy", "mode": "line", "agg": agg_code,
-                        "roles": {"x": x_col, "y": y_col, "color": color_col}}
 
             elif chart_type == "میله‌ای (Bar)":
                 fig = px.bar(plot_df, x=x_col, y=y_col, color=color_col, barmode="group")
                 if pd.api.types.is_numeric_dtype(df[y_col]) and not pd.api.types.is_numeric_dtype(df[x_col]):
                     analysis_type, analysis_params = "anova", {"num_col": y_col, "cat_col": x_col}
-                spec = {"type": "xy", "mode": "bar", "agg": agg_code or "sum",
-                        "roles": {"x": x_col, "y": y_col, "color": color_col}}
 
             elif chart_type == "پراکنش (Scatter)":
                 fig = px.scatter(plot_df, x=x_col, y=y_col, color=color_col, trendline="ols")
                 analysis_type, analysis_params = "regression", {"x_col": x_col, "y_col": y_col}
-                spec = {"type": "xy", "mode": "scatter", "roles": {"x": x_col, "y": y_col, "color": color_col}}
 
             elif chart_type == "هیستوگرام":
                 fig = px.histogram(plot_df, x=x_col, color=color_col, nbins=bins, marginal="box")
                 analysis_type, analysis_params = "distribution", {"col": x_col}
-                spec = {"type": "hist", "bins": bins, "roles": {"x": x_col, "color": color_col}}
 
             elif chart_type == "باکس‌پلات (Box)":
                 fig = px.box(plot_df, x=x_col, y=y_col, color=color_col)
                 analysis_type, analysis_params = "anova", {"num_col": y_col, "cat_col": x_col}
-                spec = {"type": "xy", "mode": "box", "roles": {"x": x_col, "y": y_col, "color": color_col}}
 
             elif chart_type == "ویولن (Violin)":
                 fig = px.violin(plot_df, x=x_col, y=y_col, color=color_col, box=True)
                 analysis_type, analysis_params = "anova", {"num_col": y_col, "cat_col": x_col}
-                spec = {"type": "xy", "mode": "violin", "roles": {"x": x_col, "y": y_col, "color": color_col}}
 
             elif chart_type == "دایره‌ای (Pie)":
                 if values_col == "تعداد (شمارش خودکار)":
                     vc = df[names_col].value_counts(dropna=False).reset_index()
                     vc.columns = [names_col, "تعداد"]
                     fig = px.pie(vc, names=names_col, values="تعداد")
-                    spec = {"type": "pie", "roles": {"names": names_col, "values": None}}
                 else:
                     fig = px.pie(df, names=names_col, values=values_col)
-                    spec = {"type": "pie", "roles": {"names": names_col, "values": values_col}}
                 analysis_type, analysis_params = "categorical", {"col": names_col}
 
             elif chart_type == "نقشه حرارتی همبستگی (Heatmap)":
@@ -1518,7 +1040,6 @@ with tab_manual:
                     corr = df[selected_numeric].corr(numeric_only=True)
                     fig = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-1, zmax=1)
                     analysis_type, analysis_params = "correlation", {"numeric_cols": selected_numeric}
-                    spec = {"type": "heatmap_corr", "roles": {"numeric_cols": selected_numeric}}
 
             elif chart_type == "میله‌ای پشته‌ای (Stacked Bar)":
                 if not stack_y_cols:
@@ -1529,7 +1050,6 @@ with tab_manual:
                     fig = px.bar(melted, x=x_col, y="مقدار", color="سری", barmode="stack")
                     if len(stack_y_cols) == 1:
                         analysis_type, analysis_params = "anova", {"num_col": stack_y_cols[0], "cat_col": x_col}
-                    spec = {"type": "stacked_xy", "roles": {"x": x_col, "y_cols": stack_y_cols}}
 
             elif chart_type == "پراکنش حبابی (Bubble)":
                 if not size_col:
@@ -1538,17 +1058,12 @@ with tab_manual:
                     fig = px.scatter(df, x=x_col, y=y_col, size=size_col, color=color_col,
                                       size_max=45, hover_name=color_col)
                     analysis_type, analysis_params = "regression", {"x_col": x_col, "y_col": y_col}
-                    spec = {"type": "xy", "mode": "bubble",
-                            "roles": {"x": x_col, "y": y_col, "size": size_col, "color": color_col}}
 
             elif chart_type == "نقشه حرارتی محوری (Heatmap Pivot)":
                 if not col_col:
                     st.warning("ستون‌های سطر و ستون باید متفاوت باشند.")
                 else:
                     fig = make_pivot_heatmap(df, row_col, col_col, value_col, pivot_agg)
-                    spec = {"type": "heatmap_pivot", "agg": pivot_agg,
-                            "roles": {"row": row_col, "col": col_col,
-                                      "value": None if value_col == "تعداد (شمارش خودکار)" else value_col}}
 
             elif chart_type == "وتری (Chord Diagram)":
                 if not chord_target:
@@ -1568,20 +1083,12 @@ with tab_manual:
                     fig = make_chord_diagram(labels, matrix)
                     if fig is None:
                         st.warning("داده کافی برای رسم نمودار وتری وجود ندارد.")
-                    else:
-                        spec = {"type": "chord",
-                                "roles": {"source": chord_source, "target": chord_target,
-                                          "value": None if chord_value == "تعداد (شمارش خودکار)" else chord_value},
-                                "extra": {"top_n": chord_top_n}}
 
             elif chart_type == "رادار مقایسه‌ای (Radar Compare)":
                 if len(radar_metrics) < 3:
                     st.warning("برای رادار حداقل به سه محور (ستون عددی) نیاز است.")
                 else:
                     fig = make_radar_comparison(df, radar_metrics, radar_subject_col, radar_subjects, radar_agg)
-                    spec = {"type": "radar", "agg": radar_agg,
-                            "roles": {"metrics": radar_metrics, "subject": radar_subject_col},
-                            "extra": {"subjects": radar_subjects}}
 
             elif chart_type == "درختی (Treemap)":
                 if not tree_path_cols:
@@ -1592,9 +1099,6 @@ with tab_manual:
                     else:
                         fig = px.treemap(df, path=[px.Constant("همه")] + tree_path_cols, values=tree_value_col)
                     fig.update_traces(root_color=CARD_COLOR)
-                    spec = {"type": "treemap",
-                            "roles": {"path": tree_path_cols,
-                                      "value": None if tree_value_col == "تعداد (شمارش خودکار)" else tree_value_col}}
 
             elif chart_type == "کارت اطلاعاتی (Info Cards)":
                 if not card_metrics:
@@ -1603,9 +1107,6 @@ with tab_manual:
                     fig = make_info_cards_html(df, card_metrics, card_agg)
                     if fig is None:
                         st.warning("داده کافی برای ساخت کارت وجود ندارد.")
-                    else:
-                        spec = {"type": "info_cards", "roles": {"metrics": card_metrics},
-                                "extra": {"agg_label": card_agg}}
 
             elif chart_type in ["گیج عقربه‌دار (Gauge)", "گیج نیم‌دایره‌ای (Half Gauge)"]:
                 s = df[gauge_metric].dropna()
@@ -1616,12 +1117,8 @@ with tab_manual:
                     label = plot_title or gauge_metric
                     if chart_type == "گیج عقربه‌دار (Gauge)":
                         fig = make_gauge_needle(val, gauge_min, gauge_max, label)
-                        spec_type = "gauge"
                     else:
                         fig = make_half_gauge(val, gauge_min, gauge_max, label)
-                        spec_type = "half_gauge"
-                    spec = {"type": spec_type, "agg": gauge_agg, "roles": {"metric": gauge_metric},
-                            "extra": {"min": gauge_min, "max": gauge_max, "title": label}}
 
             if fig is not None:
                 is_html_content = chart_type == "کارت اطلاعاتی (Info Cards)"
@@ -1632,7 +1129,6 @@ with tab_manual:
                 st.session_state["_manual_analysis_params"] = analysis_params
                 st.session_state["_manual_title"] = plot_title or chart_type
                 st.session_state["_manual_is_html"] = is_html_content
-                st.session_state["_manual_spec"] = spec
         except Exception as e:
             st.error(f"خطا در رسم نمودار: {e}")
 
@@ -1640,14 +1136,12 @@ with tab_manual:
         atype = st.session_state.get("_manual_analysis_type")
         aparams = st.session_state.get("_manual_analysis_params") or {}
         is_html_content = st.session_state.get("_manual_is_html", False)
-        manual_spec = st.session_state.get("_manual_spec")
         if atype:
             analysis = run_analysis({"type": atype, "params": aparams}, df)
         else:
             analysis = {"error": "برای این ترکیب نمودار، تحلیل آماری خودکار در دسترس نیست."}
         render_analysis_block("manual_current", st.session_state.get("_manual_title", "نمودار دلخواه"),
-                               st.session_state["_manual_fig"], atype or "none", analysis, is_html=is_html_content,
-                               chart_spec=manual_spec, spec_df=df)
+                               st.session_state["_manual_fig"], atype or "none", analysis, is_html=is_html_content)
 
 # --------------------------- تب ۳: گزارش و داشبورد من -----------------------
 with tab_report:
@@ -1692,54 +1186,16 @@ with tab_report:
                         f"<script src='https://cdn.plot.ly/plotly-2.32.0.min.js'></script>{item['fig_html']}",
                         height=480, scrolling=True,
                     )
-                    if item["insight_html"]:
-                        st.markdown(f'<div class="insight-box">{item["insight_html"]}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="insight-box">{item["insight_html"]}</div>', unsafe_allow_html=True)
 
         st.divider()
-        col_clear, col_export, col_slides = st.columns([1, 1, 1])
+        col_clear, col_export = st.columns([1, 1])
         with col_clear:
             if st.button("🧹 پاک‌کردن کل گزارش"):
                 st.session_state.report_items = []
                 st.rerun()
 
         with col_export:
-            def insight_block(insight_html: str) -> str:
-                """اگر برای این نمودار بینش/تحلیلی موجود نباشد، هیچ باکسی در خروجی درج نمی‌شود
-                (به‌جای نمایش زیرنویس «تحلیل آماری در دسترس نیست»)."""
-                return f'<div class="insight">{insight_html}</div>' if insight_html else ""
-
-            def render_card_inner(it):
-                if it.get("chart_spec") and it.get("filter_cols"):
-                    filt_html = ""
-                    for col in it["filter_cols"]:
-                        vals = it["filter_values"].get(col, [])
-                        boxes = "".join(
-                            f'<label style="display:inline-flex;align-items:center;gap:4px;margin:2px 12px 2px 0;font-size:13px;">'
-                            f'<input type="checkbox" class="filter-checkbox" data-item="{it["id"]}" '
-                            f'data-col="{html_escape(col)}" value="{html_escape(v)}" checked '
-                            f'onchange="renderReportItem(\'{it["id"]}\')"> {html_escape(v)}</label>'
-                            for v in vals
-                        )
-                        controls = (
-                            '<span class="filter-controls">'
-                            f'<button type="button" class="mini-btn" '
-                            f'onclick="setAllFilterChecks(\'{it["id"]}\',\'{html_escape(col)}\',true)">✅ انتخاب همه</button>'
-                            f'<button type="button" class="mini-btn" '
-                            f'onclick="setAllFilterChecks(\'{it["id"]}\',\'{html_escape(col)}\',false)">◻️ هیچ‌کدام</button>'
-                            '</span>'
-                        )
-                        filt_html += f'<div class="filter-group"><b>{html_escape(col)}:</b>{controls}<br>{boxes}</div>'
-                    body = f'<div class="filters">{filt_html}</div><div id="plot_{it["id"]}" style="width:100%;min-height:420px;"></div>'
-                    script = (
-                        '<script>window.__reportData = window.__reportData || {};'
-                        f'window.__reportData["{it["id"]}"] = {{'
-                        f'records: {json.dumps(it["records"], ensure_ascii=False)}, '
-                        f'spec: {json.dumps(it["chart_spec"], ensure_ascii=False)}, '
-                        f'filter_cols: {json.dumps(it["filter_cols"], ensure_ascii=False)}}};</script>'
-                    )
-                    return body + script
-                return it["fig_html"]
-
             def build_report_html(items, title, desc):
                 blocks = []
                 i = 0
@@ -1750,12 +1206,12 @@ with tab_report:
                         blocks.append(f"""
                         <div class="row">
                           <div class="card half">
-                            <h3>{it['title']}</h3>{render_card_inner(it)}
-                            {insight_block(it['insight_html'])}
+                            <h3>{it['title']}</h3>{it['fig_html']}
+                            <div class="insight">{it['insight_html']}</div>
                           </div>
                           <div class="card half">
-                            <h3>{it2['title']}</h3>{render_card_inner(it2)}
-                            {insight_block(it2['insight_html'])}
+                            <h3>{it2['title']}</h3>{it2['fig_html']}
+                            <div class="insight">{it2['insight_html']}</div>
                           </div>
                         </div>""")
                         i += 2
@@ -1763,8 +1219,8 @@ with tab_report:
                         blocks.append(f"""
                         <div class="row">
                           <div class="card full">
-                            <h3>{it['title']}</h3>{render_card_inner(it)}
-                            {insight_block(it['insight_html'])}
+                            <h3>{it['title']}</h3>{it['fig_html']}
+                            <div class="insight">{it['insight_html']}</div>
                           </div>
                         </div>""")
                         i += 1
@@ -1790,15 +1246,6 @@ h1 {{ color:#0f172a; margin-bottom:4px; }}
 .card.full {{ flex: 1 1 100%; }}
 .card.half {{ flex: 1 1 calc(50% - 9px); min-width: 320px; }}
 .insight {{ background: rgba(37, 99, 235, 0.06); border-right:4px solid {ACCENT_2}; padding:10px 14px; border-radius:8px; margin-top:10px; line-height: 1.9; }}
-.filters {{ background:#f8fafc; border:1px solid {GRID_COLOR}; border-radius:10px; padding:10px 14px; margin-bottom:12px; }}
-.filter-group {{ margin-bottom:8px; }}
-.filter-group b {{ color:#0f172a; }}
-.filter-controls {{ margin-right:10px; }}
-.mini-btn {{
-    font-family:'Vazirmatn', Tahoma, sans-serif; font-size:11px; margin-right:4px;
-    background:{CARD_COLOR}; border:1px solid {GRID_COLOR}; border-radius:6px; padding:2px 8px; cursor:pointer; color:{TEXT_COLOR};
-}}
-.mini-btn:hover {{ background:{ACCENT_COLOR}; color:#ffffff; border-color:{ACCENT_COLOR}; }}
 footer {{ margin-top:32px; color:#94a3b8; font-size:13px; text-align:center; }}
 </style>
 </head>
@@ -1807,7 +1254,6 @@ footer {{ margin-top:32px; color:#94a3b8; font-size:13px; text-align:center; }}
 <p class="desc">{desc}</p>
 {''.join(blocks)}
 <footer>ساخته‌شده با Smart Chart Explorer Pro · {datetime.now().strftime('%Y-%m-%d %H:%M')}</footer>
-{REPORT_JS_ENGINE}
 </body>
 </html>"""
                 return html
@@ -1821,100 +1267,5 @@ footer {{ margin-top:32px; color:#94a3b8; font-size:13px; text-align:center; }}
                 type="primary",
             )
 
-        with col_slides:
-            def build_slideshow_html(items, title, desc):
-                slides = []
-                for it in items:
-                    slides.append(f"""
-                    <section class="slide">
-                      <h2>{it['title']}</h2>
-                      <div class="slide-chart">{render_card_inner(it)}</div>
-                      {insight_block(it['insight_html'])}
-                    </section>""")
-
-                total_slides = len(items) + 1  # + اسلاید عنوان
-                html = f"""<!DOCTYPE html>
-<html lang="fa" dir="rtl">
-<head>
-<meta charset="UTF-8">
-<title>{title} — نمایش اسلایدی</title>
-<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
-<style>
-@import url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css');
-* {{ box-sizing: border-box; }}
-html, body {{ height:100%; margin:0; }}
-body {{ font-family:'Vazirmatn', Tahoma, sans-serif; background:#0f172a; color:{TEXT_COLOR}; direction: rtl; overflow:hidden; }}
-.deck {{ position:relative; width:100vw; height:calc(100vh - 56px); }}
-.slide {{
-   position:absolute; inset:0; display:flex; flex-direction:column;
-   background:{CARD_COLOR}; padding:40px 60px; overflow:auto; visibility:hidden;
-}}
-.slide.active {{ visibility:visible; z-index:2; }}
-.slide h2 {{ color:#0f172a; border-right:5px solid {ACCENT_COLOR}; padding-right:14px; margin:0 0 18px 0; font-size:26px; flex-shrink:0; }}
-.slide-chart {{ flex:1; min-height:0; }}
-.slide .insight {{
-    background: rgba(37, 99, 235, 0.06); border-right:4px solid {ACCENT_2}; padding:12px 16px;
-    border-radius:8px; margin-top:14px; line-height:1.9; max-height:24vh; overflow:auto; flex-shrink:0;
-}}
-.title-slide {{ align-items:center; justify-content:center; text-align:center; }}
-.title-slide h1 {{ font-size:38px; color:#0f172a; margin-bottom:10px; }}
-.title-slide p {{ color:#64748b; font-size:18px; }}
-.deck-bar {{
-   position:fixed; bottom:0; left:0; right:0; height:56px; background:#0f172a;
-   display:flex; align-items:center; justify-content:center; gap:18px; color:#e2e8f0; font-size:14px; z-index:10;
-}}
-.deck-bar button {{
-   background:{ACCENT_COLOR}; color:#fff; border:none; border-radius:8px; padding:8px 18px;
-   cursor:pointer; font-family:inherit; font-weight:700;
-}}
-.deck-bar button:hover {{ background:{ACCENT_2}; color:#1e293b; }}
-</style>
-</head>
-<body>
-<div class="deck">
-  <section class="slide title-slide active">
-     <h1>{title}</h1>
-     <p>{desc}</p>
-     <p style="color:#94a3b8;font-size:13px;margin-top:40px;">ساخته‌شده با Smart Chart Explorer Pro · {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
-  </section>
-  {''.join(slides)}
-</div>
-<div class="deck-bar">
-  <button onclick="prevSlide()">▶ قبلی</button>
-  <span id="slide-counter">{fa_num(1)} / {fa_num(total_slides)}</span>
-  <button onclick="nextSlide()">بعدی ◀</button>
-</div>
-{REPORT_JS_ENGINE}
-<script>
-(function(){{
-  let idx = 0;
-  const slides = document.querySelectorAll('.slide');
-  const counterEl = document.getElementById('slide-counter');
-  const faDigits = n => String(n).replace(/[0-9]/g, d => '۰۱۲۳۴۵۶۷۸۹'[d]);
-  function show(i){{
-    slides.forEach((s,k)=> s.classList.toggle('active', k===i));
-    counterEl.textContent = faDigits(i+1) + ' / ' + faDigits(slides.length);
-  }}
-  window.nextSlide = function(){{ idx = Math.min(idx+1, slides.length-1); show(idx); }};
-  window.prevSlide = function(){{ idx = Math.max(idx-1, 0); show(idx); }};
-  document.addEventListener('keydown', function(e){{
-    if(e.key==='ArrowRight' || e.key===' ') window.nextSlide();
-    else if(e.key==='ArrowLeft') window.prevSlide();
-  }});
-  show(0);
-}})();
-</script>
-</body>
-</html>"""
-                return html
-
-            slideshow_html = build_slideshow_html(st.session_state.report_items, report_title, report_desc)
-            st.download_button(
-                "🖥️ دانلود به‌صورت نمایش اسلایدی HTML",
-                data=slideshow_html.encode("utf-8"),
-                file_name=f"{report_title.replace(' ', '_') or 'report'}_اسلایدی.html",
-                mime="text/html",
-            )
-
 st.divider()
-st.caption("(📉 طراحی و ساخت: علی اکبر محزون)")
+st.caption("ساخته‌شده با Streamlit · Pandas · NumPy · Plotly · SciPy · Statsmodels")
